@@ -16,5 +16,12 @@
       </intent-filter>
       <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="true" />
     </service>
+    <receiver
+        android:name="com.wisecodex.flutter_v2ray.xray.core.AutoDisconnectReceiver"
+        android:exported="false">
+        <intent-filter>
+            <action android:name="com.wisecodex.flutter_v2ray.AUTO_DISCONNECT" />
+        </intent-filter>
+    </receiver>
   </application>
 </manifest>

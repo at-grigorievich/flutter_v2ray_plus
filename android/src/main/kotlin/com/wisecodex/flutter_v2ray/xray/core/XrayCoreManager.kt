@@ -21,6 +21,7 @@ import com.wisecodex.flutter_v2ray.xray.utils.Utilities
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import android.app.AlarmManager
 
 /**
  * Manages the Xray Core process lifecycle and configuration.
@@ -40,6 +41,7 @@ object XrayCoreManager {
     // MARK: - Properties
 
     private var xrayProcess: Process? = null
+    private var autoDisconnectTriggerAtMs = 0L
     private var countDownTimer: CountDownTimer? = null
     private var connectionDurationSeconds = 0
     
@@ -294,42 +296,41 @@ object XrayCoreManager {
         countDownTimer?.cancel()
         connectionDurationSeconds = 0
         serviceContext = context as? Service
-        
-        // Initialize auto-disconnect from config
+
         val config = AppConfigs.V2RAY_CONFIG
         if (config != null && config.AUTO_DISCONNECT_DURATION > 0) {
+            //Log.d(TAG, "AUTO_DISCONNECT_DURATION from config: ${config.AUTO_DISCONNECT_DURATION}")
             autoDisconnectEnabled = true
             remainingAutoDisconnectSeconds = config.AUTO_DISCONNECT_DURATION
-            Log.d(TAG, "Auto-disconnect enabled: ${remainingAutoDisconnectSeconds}s")
+            
+            context.getSharedPreferences("flutter_v2ray_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putString("expiry_notification_message", config.AUTO_DISCONNECT_EXPIRED_MESSAGE ?: "VPN session expired")
+                .apply()
+
+            scheduleAutoDisconnectAlarm(context, config.AUTO_DISCONNECT_DURATION.toLong())
+            //Log.d(TAG, "Auto-disconnect alarm scheduled: ${remainingAutoDisconnectSeconds}s")
         } else {
             autoDisconnectEnabled = false
             remainingAutoDisconnectSeconds = -1
         }
-        
+
         countDownTimer = object : CountDownTimer(Long.MAX_VALUE, TIMER_INTERVAL_MS) {
             override fun onTick(millisUntilFinished: Long) {
                 connectionDurationSeconds++
-                
-                // Handle auto-disconnect countdown
-                if (autoDisconnectEnabled && remainingAutoDisconnectSeconds > 0) {
-                    remainingAutoDisconnectSeconds--
-                    
-                    // Update notification with remaining time
-                    val config = AppConfigs.V2RAY_CONFIG
-                    if (config != null && config.AUTO_DISCONNECT_SHOW_IN_NOTIFICATION) {
-                        updateNotificationWithRemainingTime(context, config)
-                    }
-                    
-                    // Check for expiry
-                    if (remainingAutoDisconnectSeconds <= 0) {
-                        handleAutoDisconnectExpiry(context)
-                        return
-                    }
+
+                if (autoDisconnectEnabled && autoDisconnectTriggerAtMs > 0) {
+                    val remaining = ((autoDisconnectTriggerAtMs - System.currentTimeMillis()) / 1000).toInt()
+                    remainingAutoDisconnectSeconds = if (remaining > 0) remaining else 0
                 }
-                
+
+                val config = AppConfigs.V2RAY_CONFIG
+                if (config != null && config.AUTO_DISCONNECT_SHOW_IN_NOTIFICATION) {
+                    updateNotificationWithRemainingTime(context, config)
+                }
+
                 broadcastConnectionStatus(context)
             }
-
             override fun onFinish() {}
         }.start()
     }
@@ -340,7 +341,59 @@ object XrayCoreManager {
         connectionDurationSeconds = 0
         remainingAutoDisconnectSeconds = -1
         autoDisconnectEnabled = false
+        autoDisconnectTriggerAtMs = 0L
+        serviceContext?.let { cancelAutoDisconnectAlarm(it) }
         serviceContext = null
+    }
+
+    private fun scheduleAutoDisconnectAlarm(context: Context, durationSeconds: Long) {
+        //Log.d(TAG, "Auto-disconnect alarm set for ${durationSeconds}s from now")
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val triggerAtMs = System.currentTimeMillis() + durationSeconds * 1000
+        autoDisconnectTriggerAtMs = triggerAtMs
+
+        android.util.Log.d(TAG, "Alarm triggerAtMs=$triggerAtMs, current=${System.currentTimeMillis()}, diff=${triggerAtMs - System.currentTimeMillis()}ms")
+
+        val intent = Intent(context, AutoDisconnectReceiver::class.java).apply {
+            action = ACTION_AUTO_DISCONNECT
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context, ALARM_REQUEST_CODE, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        alarmManager.cancel(pendingIntent)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent
+            )
+        } else {
+            alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMs, pendingIntent)
+        }
+        //Log.d(TAG, "Auto-disconnect alarm set for ${durationSeconds}s from now")
+    }
+
+    private fun cancelAutoDisconnectAlarm(context: Context) {
+        autoDisconnectTriggerAtMs = 0L
+        val intent = Intent(context, AutoDisconnectReceiver::class.java).apply {
+            action = ACTION_AUTO_DISCONNECT
+        }
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val pendingIntent = PendingIntent.getBroadcast(
+            context, ALARM_REQUEST_CODE, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+        //Log.d(TAG, "Auto-disconnect alarm cancelled")
+    }
+
+    fun saveAutoDisconnectTimestamp(context: Context) {
+        @Suppress("DEPRECATION")
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE or Context.MODE_MULTI_PROCESS)
+            .edit()
+            .putLong(KEY_AUTO_DISCONNECT_TIMESTAMP, System.currentTimeMillis())
+            .commit()
     }
 
     private fun broadcastConnectionStatus(context: Context) {
@@ -880,4 +933,7 @@ object XrayCoreManager {
             .remove(KEY_AUTO_DISCONNECT_TIMESTAMP)
             .commit()
     }
+
+    private const val ACTION_AUTO_DISCONNECT = "com.wisecodex.flutter_v2ray.AUTO_DISCONNECT"
+    private const val ALARM_REQUEST_CODE = 9001
 }
