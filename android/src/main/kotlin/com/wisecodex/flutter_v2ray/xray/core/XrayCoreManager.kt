@@ -325,7 +325,7 @@ object XrayCoreManager {
                 }
 
                 val config = AppConfigs.V2RAY_CONFIG
-                if (config != null && config.AUTO_DISCONNECT_SHOW_IN_NOTIFICATION) {
+                if (config != null && config.AUTO_DISCONNECT_SHOW_IN_NOTIFICATION && autoDisconnectEnabled) {
                     updateNotificationWithRemainingTime(context, config)
                 }
 
